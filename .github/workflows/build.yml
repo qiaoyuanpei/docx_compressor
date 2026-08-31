@@ -1,31 +1,75 @@
-name: 打包 Windows EXE
+name: 自动打包 Windows EXE + macOS APP
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main ]        # 推送到 main 分支时自动触发
+  workflow_dispatch:           # 也支持在网页上手动触发
 
 jobs:
+
+  # ──────────────────────────────────────────
+  #  Windows → 打包 .exe
+  # ──────────────────────────────────────────
   build-windows:
     runs-on: windows-latest
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4          # v3 → v4
+        uses: actions/checkout@v4
 
       - name: 安装 Python
-        uses: actions/setup-python@v5      # v4 → v5
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: 安装依赖
         run: |
-          pip install pyinstaller Pillow
+          pip install Pillow PyMuPDF pyinstaller
 
       - name: 打包 EXE
         run: |
-          pyinstaller --onefile --windowed --name DOCX压缩工具 docx_compressor.py
+          pyinstaller --onefile --windowed `
+            --name "文档图片压缩工具" `
+            docx_compressor.py
 
-      - name: 上传 EXE 文件
-        uses: actions/upload-artifact@v4   # v3 → v4 ← 这是报错的根本原因
+      - name: 上传 EXE
+        uses: actions/upload-artifact@v4
         with:
-          name: DOCX压缩工具-Windows
-          path: dist/DOCX压缩工具.exe
+          name: 文档图片压缩工具-Windows
+          path: dist/文档图片压缩工具.exe
+          retention-days: 30        # 保留 30 天
+
+  # ──────────────────────────────────────────
+  #  macOS → 打包 .app
+  # ──────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: |
+          pip3 install Pillow PyMuPDF pyinstaller
+
+      - name: 打包 APP
+        run: |
+          pyinstaller --onefile --windowed \
+            --name "文档图片压缩工具" \
+            docx_compressor.py
+
+      - name: 压缩 .app 为 zip
+        run: |
+          cd dist
+          zip -r 文档图片压缩工具-macOS.zip "文档图片压缩工具.app"
+
+      - name: 上传 APP
+        uses: actions/upload-artifact@v4
+        with:
+          name: 文档图片压缩工具-macOS
+          path: dist/文档图片压缩工具-macOS.zip
+          retention-days: 30
