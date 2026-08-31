@@ -6,12 +6,13 @@ on:
 
 jobs:
   build-windows:
-    runs-on: windows-latest      # 使用 GitHub 的 Windows 服务器
+    runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: 检出代码
+        uses: actions/checkout@v4          # v3 → v4
 
       - name: 安装 Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5      # v4 → v5
         with:
           python-version: '3.11'
 
@@ -24,7 +25,7 @@ jobs:
           pyinstaller --onefile --windowed --name DOCX压缩工具 docx_compressor.py
 
       - name: 上传 EXE 文件
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4   # v3 → v4 ← 这是报错的根本原因
         with:
           name: DOCX压缩工具-Windows
-          path: dist/DOCX压缩工具.exe  # 打包好的 EXE
+          path: dist/DOCX压缩工具.exe
