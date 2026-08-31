@@ -1,6 +1,5 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
-import os
 import zipfile
 import threading
 import tempfile
@@ -40,19 +39,18 @@ def has_transparency(img: "Image.Image") -> bool:
     """检测图片是否含有透明像素"""
     if img.mode == "RGBA":
         extrema = img.split()[3].getextrema()
-        return extrema[0] < 255  # alpha 最小值 < 255 说明有透明区域
+        return extrema[0] < 255
     if img.mode == "P":
         return "transparency" in img.info
     return False
 
 
 def compress_image(img_path: Path, quality: int, max_dim: int,
-                   max_bytes: int, log_fn) -> tuple:
+                   max_bytes: int, force_jpeg: bool, log_fn) -> tuple:
     """
     压缩单张图片
-    - 有透明通道的 PNG：强制保持 PNG，绝不转 JPEG，避免出现白色方块
-    - 无透明的 PNG：若 PNG 压缩后仍超限，自动转为 JPEG 继续压
-    - 转格式时同步重命名文件，并返回新路径
+    force_jpeg=True  → 所有图片（含透明 PNG）强制转为 JPEG，透明区域填白色背景
+    force_jpeg=False → 含透明通道的 PNG 保持 PNG 格式，不转 JPEG
     返回：(原始字节数, 新字节数, 是否重命名, 新路径)
     """
     ext = img_path.suffix.lower()
@@ -89,10 +87,14 @@ def compress_image(img_path: Path, quality: int, max_dim: int,
                 return image
 
             # ── 3. 决定目标格式 ──────────────────────
-            # ⚠️ 有透明通道 → 坚持 PNG，绝不转 JPEG
-            if is_transparent:
+            if is_transparent and not force_jpeg:
+                # 有透明 + 未强制转换 → 保持 PNG
                 save_fmt = 'PNG'
                 log_fn(f"  🔒 {img_path.name}：含透明通道，保持 PNG 格式")
+            elif is_transparent and force_jpeg:
+                # 有透明 + 强制转换 → 转 JPEG，白底填充
+                save_fmt = 'JPEG'
+                log_fn(f"  ⚠️  {img_path.name}：含透明通道，强制转 JPEG（透明区域填白色）")
             elif ext in {'.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.webp'}:
                 save_fmt = 'JPEG'
             else:
@@ -127,18 +129,18 @@ def compress_image(img_path: Path, quality: int, max_dim: int,
                         # 后缀名不同 → 重命名
                         new_path = img_path.with_suffix('.jpg')
                         new_path.write_bytes(buf.getvalue())
-                        img_path.unlink()   # 删除旧 .png 文件
+                        img_path.unlink()
                         converted_to_jpeg = True
                         log_fn(
                             f"  🔄 {img_path.name} → "
-                            f"{new_path.name}（PNG 转 JPEG）"
+                            f"{new_path.name}（已重命名）"
                         )
                     else:
                         img_path.write_bytes(buf.getvalue())
                     break
 
-                # PNG 超限且无透明 → 转 JPEG 再试
-                if save_fmt == 'PNG' and not is_transparent:
+                # PNG 超限且（无透明 或 强制转换）→ 转 JPEG
+                if save_fmt == 'PNG' and (not is_transparent or force_jpeg):
                     save_fmt = 'JPEG'
                     cur_img = to_rgb(cur_img)
                     log_fn(
@@ -159,13 +161,11 @@ def compress_image(img_path: Path, quality: int, max_dim: int,
 def update_rels_for_renamed(extract_dir: Path,
                              old_name: str, new_name: str, log_fn):
     """
-    PNG 改名为 JPG 后，同步更新 Word 内部的 .rels 引用文件，
-    防止 Word 打开后图片丢失
+    PNG 改名为 JPG 后，同步更新 Word 内部 .rels 引用，防止图片丢失
     """
     rels_path = extract_dir / "word" / "_rels" / "document.xml.rels"
     if not rels_path.exists():
         return
-
     content = rels_path.read_text(encoding='utf-8')
     if old_name in content:
         new_content = content.replace(old_name, new_name)
@@ -174,10 +174,10 @@ def update_rels_for_renamed(extract_dir: Path,
 
 
 def run_compress(input_path: Path, quality: int, max_dim: int,
-                 max_mb: float, progress_fn, status_fn, log_fn):
+                 max_mb: float, force_jpeg: bool,
+                 progress_fn, status_fn, log_fn):
     """
     主流程：解压 docx → 压缩图片 → 重新打包为 docx
-    输出文件名：原文件名_compressed.docx（不覆盖原文件）
     """
     output_path = input_path.parent / (
         input_path.stem + "_compressed.docx"
@@ -186,7 +186,11 @@ def run_compress(input_path: Path, quality: int, max_dim: int,
     orig_total = input_path.stat().st_size
 
     log_fn(f"📂 文件：{input_path.name}")
-    log_fn(f"📦 原始大小：{orig_total / 1024 / 1024:.2f} MB\n")
+    log_fn(f"📦 原始大小：{orig_total / 1024 / 1024:.2f} MB")
+    log_fn(f"⚙️  参数：质量={quality}，最大边="
+           f"{'不限' if max_dim == 0 else str(max_dim) + 'px'}，"
+           f"单图上限={max_mb}MB，"
+           f"强制转JPEG={'是 ⚠️' if force_jpeg else '否 🔒'}\n")
 
     with tempfile.TemporaryDirectory() as tmp:
         extract_dir = Path(tmp) / "doc"
@@ -212,11 +216,7 @@ def run_compress(input_path: Path, quality: int, max_dim: int,
         log_fn(f"── Step 2 共发现 {len(all_files)} 个媒体文件 ──────────")
 
         # ── Step 3：逐张压缩 ──────────────────────────
-        log_fn(
-            f"\n── Step 3 压缩图片（质量={quality}, "
-            f"最大边={max_dim if max_dim > 0 else '不限制'}px, "
-            f"单图上限={max_mb}MB）──"
-        )
+        log_fn(f"\n── Step 3 开始逐张压缩 ──────────────────")
         total_orig = total_new = 0
 
         for idx, fpath in enumerate(all_files, 1):
@@ -224,12 +224,11 @@ def run_compress(input_path: Path, quality: int, max_dim: int,
             status_fn(f"处理 {idx}/{len(all_files)}: {fpath.name}")
 
             orig, new, renamed, new_path = compress_image(
-                fpath, quality, max_dim, max_bytes, log_fn
+                fpath, quality, max_dim, max_bytes, force_jpeg, log_fn
             )
             total_orig += orig
             total_new += new
 
-            # PNG 改名为 JPG → 更新 .rels 引用
             if renamed:
                 update_rels_for_renamed(
                     extract_dir, fpath.name, new_path.name, log_fn
@@ -274,7 +273,9 @@ def run_compress(input_path: Path, quality: int, max_dim: int,
         progress_fn(100)
 
         final_size = output_path.stat().st_size
-        saved_pct = (1 - final_size / orig_total) * 100 if orig_total else 0
+        saved_pct = (
+            (1 - final_size / orig_total) * 100 if orig_total else 0
+        )
 
         summary = (
             f"\n{'=' * 52}\n"
@@ -293,21 +294,21 @@ def run_compress(input_path: Path, quality: int, max_dim: int,
 #  GUI 界面
 # ──────────────────────────────────────────────
 class App:
-    BG       = "#F5F5F5"
-    BLUE     = "#1976D2"
-    GREEN    = "#388E3C"
+    BG      = "#F5F5F5"
+    BLUE    = "#1976D2"
+    GREEN   = "#388E3C"
+    ORANGE  = "#E65100"
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.font_family = FONT_FAMILY
-        self.FONT        = (self.font_family, 10)
-        self.FONT_BIG    = (self.font_family, 13, "bold")
-        self.FONT_SMALL  = (self.font_family, 8)
-        self.FONT_MED    = (self.font_family, 9)
-        self.FONT_BTN    = (self.font_family, 11, "bold")
+        self.FONT       = (FONT_FAMILY, 10)
+        self.FONT_BIG   = (FONT_FAMILY, 13, "bold")
+        self.FONT_SMALL = (FONT_FAMILY, 8)
+        self.FONT_MED   = (FONT_FAMILY, 9)
+        self.FONT_BTN   = (FONT_FAMILY, 11, "bold")
 
         root.title("DOCX 图片批量压缩工具")
-        root.geometry("760x640")
+        root.geometry("780x680")
         root.resizable(False, False)
         root.configure(bg=self.BG)
 
@@ -323,7 +324,6 @@ class App:
 
         self._build_ui()
 
-    # ── 构建界面 ──────────────────────────────────────
     def _build_ui(self):
 
         # ── 顶部标题栏 ────────────────────────────────
@@ -335,7 +335,6 @@ class App:
             font=self.FONT_BIG,
             bg=self.BLUE, fg="white"
         ).pack(side=tk.LEFT, padx=16, pady=12)
-
         tk.Label(
             header,
             text=f"运行平台：{platform.system()}",
@@ -356,9 +355,8 @@ class App:
         self.file_var = tk.StringVar()
         tk.Entry(
             box1, textvariable=self.file_var,
-            font=self.FONT, width=62
+            font=self.FONT, width=64
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-
         tk.Button(
             box1, text="浏览…", font=self.FONT,
             bg=self.BLUE, fg="white", bd=0,
@@ -415,7 +413,7 @@ class App:
                 value=val, font=self.FONT_MED, bg=self.BG
             ).pack(side=tk.LEFT, padx=4)
 
-        # 单图大小上限
+        # 单图大小上限（新增 0.3 和 0.4）
         row3 = tk.Frame(box2, bg=self.BG)
         row3.pack(fill=tk.X, pady=3)
         tk.Label(
@@ -424,29 +422,52 @@ class App:
         ).pack(side=tk.LEFT)
         self.maxmb_var = tk.DoubleVar(value=1.0)
         for label, val in [
-            ("0.5 MB", 0.5), ("1 MB", 1.0),
-            ("2 MB", 2.0),   ("5 MB", 5.0)
+            ("0.3 MB", 0.3),
+            ("0.4 MB", 0.4),
+            ("0.5 MB", 0.5),
+            ("1 MB",   1.0),
+            ("2 MB",   2.0),
+            ("5 MB",   5.0),
         ]:
             tk.Radiobutton(
                 row3, text=label, variable=self.maxmb_var,
                 value=val, font=self.FONT_MED, bg=self.BG
-            ).pack(side=tk.LEFT, padx=4)
+            ).pack(side=tk.LEFT, padx=3)
         tk.Label(
             row3,
-            text="（超过此大小自动继续降质直到达标）",
+            text="（超限自动降质直到达标）",
             font=self.FONT_SMALL, fg="gray", bg=self.BG
-        ).pack(side=tk.LEFT, padx=6)
+        ).pack(side=tk.LEFT, padx=4)
 
-        # PNG 转换说明
-        row4 = tk.Frame(box2, bg="#FFF8E1", pady=4, padx=8)
-        row4.pack(fill=tk.X, pady=(6, 0))
-        tk.Label(
+        # ── 新增：透明 PNG 强制转 JPEG 选项 ──────────
+        row4 = tk.Frame(box2, bg=self.BG)
+        row4.pack(fill=tk.X, pady=(6, 2))
+
+        self.force_jpeg_var = tk.BooleanVar(value=False)
+        force_cb = tk.Checkbutton(
             row4,
-            text="💡 含透明通道的 PNG（如 Logo、图章）将强制保持 PNG 格式，"
-                 "不会转为 JPEG，不会出现白色方块。",
-            font=self.FONT_SMALL, fg="#7B5800",
-            bg="#FFF8E1", anchor='w', wraplength=680, justify='left'
-        ).pack(fill=tk.X)
+            text="强制将含透明通道的 PNG 也转换为 JPEG（透明区域将填充为白色背景）",
+            variable=self.force_jpeg_var,
+            font=self.FONT_MED,
+            bg=self.BG,
+            fg=self.ORANGE,
+            selectcolor=self.BG,
+            activebackground=self.BG,
+            command=self._on_force_jpeg_toggle
+        )
+        force_cb.pack(side=tk.LEFT)
+
+        # 警告提示文字（默认隐藏）
+        self.force_jpeg_warn = tk.Label(
+            box2,
+            text="⚠️  注意：勾选后，Logo、图章等透明图片的透明区域会变成白色方块，"
+                 "请确认你的文档中没有依赖透明背景的图片，或你不介意此效果。",
+            font=self.FONT_SMALL,
+            fg="white", bg=self.ORANGE,
+            wraplength=710, justify='left',
+            padx=8, pady=4
+        )
+        # 初始隐藏，勾选后才显示
 
         # ── 进度 ──────────────────────────────────────
         box3 = tk.LabelFrame(
@@ -456,7 +477,7 @@ class App:
         box3.pack(fill=tk.X, pady=(0, 8))
 
         self.progress = ttk.Progressbar(
-            box3, length=700, mode='determinate'
+            box3, length=720, mode='determinate'
         )
         self.progress.pack(fill=tk.X)
         self.status_var = tk.StringVar(value="等待开始…")
@@ -474,7 +495,10 @@ class App:
 
         self.log_box = scrolledtext.ScrolledText(
             box4, height=10,
-            font=("Menlo" if platform.system() == "Darwin" else "Consolas", 9),
+            font=(
+                "Menlo" if platform.system() == "Darwin"
+                else "Consolas", 9
+            ),
             state='disabled',
             bg="#1E1E1E", fg="#D4D4D4",
             insertbackground="white"
@@ -508,6 +532,13 @@ class App:
             text="输出文件保存在原文件同目录（文件名加 _compressed）",
             font=self.FONT_SMALL, fg="gray", bg=self.BG
         ).pack(side=tk.RIGHT)
+
+    # ── 勾选「强制转 JPEG」时显示/隐藏警告 ──────────
+    def _on_force_jpeg_toggle(self):
+        if self.force_jpeg_var.get():
+            self.force_jpeg_warn.pack(fill=tk.X, pady=(2, 4), padx=0)
+        else:
+            self.force_jpeg_warn.pack_forget()
 
     # ── 事件处理 ──────────────────────────────────────
     def _browse(self):
@@ -556,6 +587,18 @@ class App:
             )
             return
 
+        # 勾选了强制转 JPEG 时，再次弹窗确认
+        if self.force_jpeg_var.get():
+            confirm = messagebox.askyesno(
+                "⚠️  请确认",
+                "你已勾选「强制将透明 PNG 转为 JPEG」。\n\n"
+                "这会导致 Logo、图章等含透明背景的图片\n"
+                "透明区域变成白色方块。\n\n"
+                "确定继续吗？"
+            )
+            if not confirm:
+                return
+
         self.start_btn.config(state='disabled', text="处理中…")
         self._clear_log()
         self.progress['value'] = 0
@@ -567,6 +610,7 @@ class App:
                     quality=self.quality_var.get(),
                     max_dim=self.dim_var.get(),
                     max_mb=self.maxmb_var.get(),
+                    force_jpeg=self.force_jpeg_var.get(),
                     progress_fn=self._set_progress,
                     status_fn=self._set_status,
                     log_fn=self._log,
