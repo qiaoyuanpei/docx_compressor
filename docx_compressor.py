@@ -591,9 +591,11 @@ class App:
         tk.Label(row3, text="单图上限：", font=self.FONT,
                  bg=self.BG, width=12, anchor='w').pack(side=tk.LEFT)
         self.maxmb_var = tk.DoubleVar(value=1.0)
-        for label, val in [("0.3 MB", 0.3), ("0.4 MB", 0.4),
-                            ("0.5 MB", 0.5), ("1 MB", 1.0),
-                            ("2 MB", 2.0),   ("5 MB", 5.0)]:
+       # 改之后，新增 0.1 MB 和 0.2 MB
+        for label, val in [("0.1 MB", 0.1), ("0.2 MB", 0.2),
+                    ("0.3 MB", 0.3), ("0.4 MB", 0.4),
+                    ("0.5 MB", 0.5), ("1 MB",   1.0),
+                    ("2 MB",   2.0), ("5 MB",   5.0)]:
             tk.Radiobutton(row3, text=label, variable=self.maxmb_var,
                            value=val, font=self.FONT_MED,
                            bg=self.BG).pack(side=tk.LEFT, padx=3)
