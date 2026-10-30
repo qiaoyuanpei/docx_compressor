@@ -36,11 +36,8 @@ FONT_FAMILY = get_font_family()
 
 
 # ──────────────────────────────────────────────
-#  DOCX 核心压缩逻辑
+#  公共工具函数
 # ──────────────────────────────────────────────
-SUPPORTED_EXT = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp'}
-
-
 def has_transparency(img):
     if img.mode == "RGBA":
         return img.split()[3].getextrema()[0] < 255
@@ -48,6 +45,11 @@ def has_transparency(img):
         return "transparency" in img.info
     return False
 
+
+# ──────────────────────────────────────────────
+#  DOCX 核心压缩逻辑
+# ──────────────────────────────────────────────
+SUPPORTED_EXT = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp'}
 
 def compress_image(img_path, quality, max_dim, max_bytes, force_jpeg, log_fn):
     ext = img_path.suffix.lower()
@@ -183,8 +185,9 @@ def run_compress_docx(input_path, quality, max_dim, max_mb,
 
             orig, new, renamed, new_path = compress_image(
                 fpath, quality, max_dim, max_bytes, force_jpeg, log_fn)
+
             total_orig += orig
-            total_new += new
+            total_new  += new
 
             if renamed:
                 update_rels_for_renamed(
@@ -228,49 +231,55 @@ def run_compress_docx(input_path, quality, max_dim, max_mb,
 
 
 # ──────────────────────────────────────────────
-#  PDF 核心压缩逻辑（已修复）
+#  PDF 核心压缩逻辑（完全修复版：防反向变大核心）
 # ──────────────────────────────────────────────
-
 def compress_image_bytes_for_pdf(img_bytes, quality, max_dim, max_bytes):
     """
-    将图片字节压缩为 JPEG 格式字节，返回 (jpeg_bytes, (width, height))。
-    PDF 流只支持 JPEG（DCTDecode）或原始像素，统一输出 JPEG 最安全。
-    透明区域统一填充白色背景。
-    失败时返回 (原始字节, None)。
+    将图片字节压缩为 JPEG 格式字节，返回 (jpeg_bytes, (width, height), is_gray)。
+    加入了灰度保护功能。
+    失败时返回 (原始字节, None, False)。
     """
     try:
         with Image.open(io.BytesIO(img_bytes)) as img:
             img.load()
 
-            # ── 缩放 ──────────────────────────────────
+            # ── 1. 灰度/单色保护，防止 1 位图被转成 24 位 RGB 导致的体积暴涨 ──
+            is_gray = False
+            if img.mode in ('1', 'L', 'P'):
+                # 如果没有透明通道，转为灰度图 (L)
+                if not has_transparency(img):
+                    img = img.convert('L')
+                    is_gray = True
+
+            # ── 2. 尺寸缩放 ──────────────────────────────
             if max_dim > 0:
                 w, h = img.size
                 if w > max_dim or h > max_dim:
                     ratio = min(max_dim / w, max_dim / h)
-                    img = img.resize(
-                        (int(w * ratio), int(h * ratio)), Image.LANCZOS)
+                    img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
 
-            # ── 统一转 RGB（透明区域填白） ─────────────
-            if img.mode == 'RGBA':
-                bg = Image.new('RGB', img.size, (255, 255, 255))
-                bg.paste(img, mask=img.split()[3])
-                img = bg
-            elif img.mode != 'RGB':
-                img = img.convert('RGB')
+            # ── 3. 彩色图统一转 RGB（透明填充白色） ─────────
+            if not is_gray:
+                if img.mode == 'RGBA':
+                    bg = Image.new('RGB', img.size, (255, 255, 255))
+                    bg.paste(img, mask=img.split()[3])
+                    img = bg
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
 
-            new_size = img.size   # (width, height) 缩放后的尺寸
+            new_size = img.size
 
-            # ── 循环降质直到达标 ───────────────────────
+            # ── 4. 循环降质 ──────────────────────────────
             cur_quality = quality
             while True:
                 buf = io.BytesIO()
                 img.save(buf, format='JPEG', quality=cur_quality, optimize=True)
                 if buf.tell() <= max_bytes or cur_quality <= 20:
-                    return buf.getvalue(), new_size
+                    return buf.getvalue(), new_size, is_gray
                 cur_quality -= 5
 
     except Exception:
-        return img_bytes, None
+        return img_bytes, None, False
 
 
 def run_compress_pdf(input_path, quality, max_dim, max_mb,
@@ -311,7 +320,6 @@ def run_compress_pdf(input_path, quality, max_dim, max_mb,
         for img_info in img_list:
             xref = img_info[0]
 
-            # 跳过已处理的 xref（PDF 中同一图片可能被多页引用）
             if xref in processed_xrefs:
                 continue
             processed_xrefs.add(xref)
@@ -326,7 +334,7 @@ def run_compress_pdf(input_path, quality, max_dim, max_mb,
                            f"{orig_size / 1024:.0f} KB（太小，跳过）")
                     continue
 
-                new_bytes, new_wh = compress_image_bytes_for_pdf(
+                new_bytes, new_wh, is_gray = compress_image_bytes_for_pdf(
                     img_bytes, quality, max_dim, max_bytes)
 
                 # 压缩失败（返回原始字节），跳过
@@ -335,46 +343,44 @@ def run_compress_pdf(input_path, quality, max_dim, max_mb,
                     continue
 
                 new_file_size = len(new_bytes)
+
+                # 🛑【关键修复核心逻辑】：压缩后如果变得更大或没变化，直接保留原文件数据！
+                if new_file_size >= orig_size:
+                    log_fn(f"  🛑 第{page_num+1}页 xref={xref}："
+                           f"原图已最优（{orig_size/1024:.0f}KB -> 压后{new_file_size/1024:.0f}KB），保留原图！")
+                    continue
+
                 total_orig   += orig_size
                 total_new    += new_file_size
                 img_count    += 1
 
-                # ✅ compress=False：禁止 PyMuPDF 再套一层 FlateDecode
-                #    否则 Filter 与实际数据不匹配 → 页面空白
+                # 写入 PDF，禁用内部 FlateDecode 压缩，避免滤镜冲突
                 doc.update_stream(xref, new_bytes, compress=False)
-
-                # ✅ 显式设置 JPEG 解码器和色彩空间
                 doc.xref_set_key(xref, "Filter",     "/DCTDecode")
-                doc.xref_set_key(xref, "ColorSpace", "/DeviceRGB")
-
-                # ✅ 同步更新宽高，避免尺寸与实际数据不符 → 空白/变形
+                doc.xref_set_key(xref, "ColorSpace", "/DeviceGray" if is_gray else "/DeviceRGB")
                 doc.xref_set_key(xref, "Width",      str(new_wh[0]))
                 doc.xref_set_key(xref, "Height",     str(new_wh[1]))
-                # BitsPerComponent 对 JPEG 固定为 8
                 doc.xref_set_key(xref, "BitsPerComponent", "8")
 
-                ratio = (1 - new_file_size / orig_size) * 100 if orig_size else 0
-                if ratio > 0:
-                    log_fn(f"  ✅ 第{page_num+1}页 xref={xref}："
-                           f"{orig_size/1024:.0f} KB → "
-                           f"{new_file_size/1024:.0f} KB (↓{ratio:.0f}%)")
-                else:
-                    log_fn(f"  ➡  第{page_num+1}页 xref={xref}："
-                           f"{orig_size/1024:.0f} KB（压缩后未减小，已写回）")
+                ratio = (1 - new_file_size / orig_size) * 100
+                log_fn(f"  ✅ 第{page_num+1}页 xref={xref}："
+                       f"{orig_size/1024:.0f} KB → "
+                       f"{new_file_size/1024:.0f} KB (↓{ratio:.0f}%)")
 
             except Exception as e:
                 log_fn(f"  ⚠  第{page_num+1}页 xref={xref} 失败：{e}")
 
-    log_fn(f"\n  共处理 {img_count} 张图片")
-    log_fn(f"  图片合计：{total_orig/1024/1024:.2f} MB → "
-           f"{total_new/1024/1024:.2f} MB\n")
+    log_fn(f"\n  共成功压缩了 {img_count} 张图片")
+    if total_orig > 0:
+        log_fn(f"  处理的图片合计：{total_orig/1024/1024:.2f} MB → "
+               f"{total_new/1024/1024:.2f} MB\n")
 
     status_fn("正在保存 PDF…")
     log_fn("── Step 2 保存压缩后的 PDF ──────────────")
     progress_fn(90)
     try:
-        # ✅ garbage=3 清理无用对象；去掉 clean=True 避免破坏图像 XObject 结构
-        doc.save(str(output_path), garbage=3, deflate=True)
+        # 🛑【关键修复核心逻辑】：使用 garbage=4 彻底抹除未引用的原始大图数据，deflate=True 开启文件流压缩
+        doc.save(str(output_path), garbage=4, deflate=True)
         doc.close()
         log_fn("  ✅ 保存成功")
     except Exception as e:
@@ -413,7 +419,6 @@ class ScrollableFrame(tk.Frame):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # 内部真正放控件的 Frame
         self.inner = tk.Frame(self.canvas, bg="#F5F5F5")
         self._win_id = self.canvas.create_window(
             (0, 0), window=self.inner, anchor="nw")
@@ -421,7 +426,6 @@ class ScrollableFrame(tk.Frame):
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
-        # 鼠标滚轮绑定（Windows + macOS 均支持）
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind_all("<Button-4>",   self._on_mousewheel)
         self.canvas.bind_all("<Button-5>",   self._on_mousewheel)
@@ -463,7 +467,6 @@ class App:
 
         root.title("文档图片批量压缩工具（DOCX + PDF）")
 
-        # ── 自动适配屏幕尺寸 ────────────────────────
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
         win_w = min(820, sw - 40)
