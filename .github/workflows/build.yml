@@ -27,15 +27,16 @@ jobs:
           pip install Pillow PyMuPDF pyinstaller
 
       - name: 使用 PyInstaller 打包 EXE
+        # 🛑 核心修复：添加 --collect-all pymupdf 收集 PyMuPDF 隐藏的数据文件
         run: |
-          pyinstaller --onefile --windowed --name "docx_compressor" docx_compressor.py
+          pyinstaller --onefile --windowed --collect-all pymupdf --name "docx_compressor" docx_compressor.py
 
       - name: 上传 Windows 产物到 Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: docx_compressor_Windows_x64
           path: dist/docx_compressor.exe
-          if-no-files-found: error    # 找不到 exe 立即报错，方便排查
+          if-no-files-found: error
           retention-days: 30
 
   # ──────────────────────────────────────────
@@ -58,8 +59,9 @@ jobs:
           pip3 install Pillow PyMuPDF pyinstaller
 
       - name: 使用 PyInstaller 打包 APP
+        # 🛑 核心修复：添加 --collect-all pymupdf
         run: |
-          pyinstaller --onefile --windowed --name "docx_compressor" docx_compressor.py
+          pyinstaller --onefile --windowed --collect-all pymupdf --name "docx_compressor" docx_compressor.py
 
       - name: 压缩 .app 为 zip 文件
         run: |
