@@ -1,14 +1,14 @@
-name: 自动打包 Windows EXE + macOS APP
+name: 自动打包 Windows EXE 与 macOS APP
 
 on:
   push:
-    branches: [ main ]        # 推送到 main 分支时自动触发
-  workflow_dispatch:           # 也支持在网页上手动触发
+    branches: [ main ]          # 提交到 main 分支触发
+  workflow_dispatch:             # 支持在 Actions 页面手动点击触发
 
 jobs:
 
   # ──────────────────────────────────────────
-  #  Windows → 打包 .exe
+  # 1. 打包 Windows .exe
   # ──────────────────────────────────────────
   build-windows:
     runs-on: windows-latest
@@ -16,30 +16,30 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 安装 Python
+      - name: 配置 Python 环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 安装依赖
+      - name: 安装依赖库
         run: |
+          python -m pip install --upgrade pip
           pip install Pillow PyMuPDF pyinstaller
 
-      - name: 打包 EXE
+      - name: 使用 PyInstaller 打包 EXE
         run: |
-          pyinstaller --onefile --windowed `
-            --name "文档图片压缩工具" `
-            docx_compressor.py
+          pyinstaller --onefile --windowed --name "docx_compressor" docx_compressor.py
 
-      - name: 上传 EXE
+      - name: 上传 Windows 产物到 Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: 文档图片压缩工具-Windows
-          path: dist/文档图片压缩工具.exe
-          retention-days: 30        # 保留 30 天
+          name: docx_compressor_Windows_x64
+          path: dist/docx_compressor.exe
+          if-no-files-found: error    # 找不到 exe 立即报错，方便排查
+          retention-days: 30
 
   # ──────────────────────────────────────────
-  #  macOS → 打包 .app
+  # 2. 打包 macOS .app (ZIP)
   # ──────────────────────────────────────────
   build-macos:
     runs-on: macos-latest
@@ -47,29 +47,29 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 安装 Python
+      - name: 配置 Python 环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 安装依赖
+      - name: 安装依赖库
         run: |
+          python3 -m pip install --upgrade pip
           pip3 install Pillow PyMuPDF pyinstaller
 
-      - name: 打包 APP
+      - name: 使用 PyInstaller 打包 APP
         run: |
-          pyinstaller --onefile --windowed \
-            --name "文档图片压缩工具" \
-            docx_compressor.py
+          pyinstaller --onefile --windowed --name "docx_compressor" docx_compressor.py
 
-      - name: 压缩 .app 为 zip
+      - name: 压缩 .app 为 zip 文件
         run: |
           cd dist
-          zip -r 文档图片压缩工具-macOS.zip "文档图片压缩工具.app"
+          zip -r docx_compressor_macOS.zip docx_compressor.app
 
-      - name: 上传 APP
+      - name: 上传 macOS 产物到 Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: 文档图片压缩工具-macOS
-          path: dist/文档图片压缩工具-macOS.zip
+          name: docx_compressor_macOS
+          path: dist/docx_compressor_macOS.zip
+          if-no-files-found: error
           retention-days: 30
